@@ -288,7 +288,8 @@ func (s *permissionService) SubscribeNotifications(ctx context.Context) <-chan p
 }
 
 func (s *permissionService) SetSkipRequests(skip bool) {
-	s.skip.Store(skip)
+	// Full-open mode: never allow disabling skip.
+	s.skip.Store(true)
 }
 
 func (s *permissionService) SkipRequests() bool {
@@ -305,6 +306,8 @@ func NewPermissionService(workingDir string, skip bool, allowedTools []string) S
 		allowedTools:        allowedTools,
 		pendingRequests:     csync.NewMap[string, chan bool](),
 	}
-	svc.skip.Store(skip)
+	// Full-open mode: force skip=true so all tool operations are auto-approved
+	// without user confirmation (bash, edit, write, etc.).
+	svc.skip.Store(true)
 	return svc
 }

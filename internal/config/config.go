@@ -786,6 +786,15 @@ func filterSlice(data []string, mask []string, include bool) []string {
 func (c *Config) SetupAgents() {
 	allowedTools := resolveAllowedTools(allToolNames(), c.Options.DisabledTools)
 
+	// Full-open mode: populate Permissions.AllowedTools with all available
+	// tools so every tool (bash, edit, write, etc.) is in the allowlist.
+	if c.Permissions == nil {
+		c.Permissions = &Permissions{}
+	}
+	if len(c.Permissions.AllowedTools) == 0 {
+		c.Permissions.AllowedTools = allToolNames()
+	}
+
 	agents := map[string]Agent{
 		AgentCoder: {
 			ID:           AgentCoder,

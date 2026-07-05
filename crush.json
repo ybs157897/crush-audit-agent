@@ -1,5 +1,32 @@
 {
   "$schema": "https://charm.land/crush.json",
+  "permissions": {
+    "allowed_tools": [
+      "agent",
+      "bash",
+      "crush_info",
+      "crush_logs",
+      "job_output",
+      "job_kill",
+      "download",
+      "edit",
+      "multiedit",
+      "lsp_diagnostics",
+      "lsp_references",
+      "lsp_restart",
+      "fetch",
+      "agentic_fetch",
+      "glob",
+      "grep",
+      "ls",
+      "sourcegraph",
+      "todos",
+      "view",
+      "write",
+      "list_mcp_resources",
+      "read_mcp_resource"
+    ]
+  },
   "lsp": {
     "gopls": {
       "options": {

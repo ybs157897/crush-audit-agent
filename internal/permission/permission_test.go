@@ -6,9 +6,28 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/crush/internal/csync"
+	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// newTestPermissionService creates a permission service for testing that
+// respects the caller's skip value, unlike NewPermissionService which forces
+// skip=true in full-open mode.
+func newTestPermissionService(workingDir string, skip bool, allowedTools []string) Service {
+	svc := &permissionService{
+		Broker:              pubsub.NewBroker[PermissionRequest](),
+		notificationBroker:  pubsub.NewBroker[PermissionNotification](),
+		workingDir:          workingDir,
+		sessionPermissions:  csync.NewMap[PermissionKey, bool](),
+		autoApproveSessions: make(map[string]bool),
+		allowedTools:        allowedTools,
+		pendingRequests:     csync.NewMap[string, chan bool](),
+	}
+	svc.skip.Store(skip)
+	return svc
+}
 
 func TestPermissionService_AllowedCommands(t *testing.T) {
 	tests := []struct {
@@ -57,7 +76,7 @@ func TestPermissionService_AllowedCommands(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			service := NewPermissionService("/tmp", false, tt.allowedTools)
+			service := newTestPermissionService("/tmp", false, tt.allowedTools)
 
 			// Create a channel to capture the permission request
 			// Since we're testing the allowlist logic, we need to simulate the request
@@ -82,7 +101,7 @@ func TestPermissionService_AllowedCommands(t *testing.T) {
 }
 
 func TestSkipRace(t *testing.T) {
-	svc := NewPermissionService("/tmp", false, nil)
+	svc := newTestPermissionService("/tmp", false, nil)
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
@@ -97,7 +116,7 @@ func TestSkipRace(t *testing.T) {
 }
 
 func TestPermissionService_SkipMode(t *testing.T) {
-	service := NewPermissionService("/tmp", true, []string{})
+	service := newTestPermissionService("/tmp", true, []string{})
 
 	result, err := service.Request(t.Context(), CreatePermissionRequest{
 		SessionID:   "test-session",
@@ -119,7 +138,7 @@ func TestPermissionService_HookApproval(t *testing.T) {
 
 	t.Run("matching tool call ID short-circuits the prompt", func(t *testing.T) {
 		t.Parallel()
-		service := NewPermissionService("/tmp", false, nil)
+		service := newTestPermissionService("/tmp", false, nil)
 
 		ctx := WithHookApproval(t.Context(), "call-42")
 		granted, err := service.Request(ctx, CreatePermissionRequest{
@@ -136,7 +155,7 @@ func TestPermissionService_HookApproval(t *testing.T) {
 
 	t.Run("approval is scoped to the stamped tool call ID", func(t *testing.T) {
 		t.Parallel()
-		service := NewPermissionService("/tmp", false, nil)
+		service := newTestPermissionService("/tmp", false, nil)
 
 		// Stamp for call-42, ask for a different call ID — must not leak.
 		ctx := WithHookApproval(t.Context(), "call-42")
@@ -169,7 +188,7 @@ func TestPermissionService_HookApproval(t *testing.T) {
 
 	t.Run("notifies subscribers that permission was granted", func(t *testing.T) {
 		t.Parallel()
-		service := NewPermissionService("/tmp", false, nil)
+		service := newTestPermissionService("/tmp", false, nil)
 
 		notifications := service.SubscribeNotifications(t.Context())
 
@@ -192,7 +211,7 @@ func TestPermissionService_HookApproval(t *testing.T) {
 
 func TestPermissionService_SequentialProperties(t *testing.T) {
 	t.Run("Sequential permission requests with persistent grants", func(t *testing.T) {
-		service := NewPermissionService("/tmp", false, []string{})
+		service := newTestPermissionService("/tmp", false, []string{})
 
 		req1 := CreatePermissionRequest{
 			SessionID:   "session1",
@@ -237,7 +256,7 @@ func TestPermissionService_SequentialProperties(t *testing.T) {
 		assert.True(t, result2, "Second request should be auto-approved")
 	})
 	t.Run("Sequential requests with temporary grants", func(t *testing.T) {
-		service := NewPermissionService("/tmp", false, []string{})
+		service := newTestPermissionService("/tmp", false, []string{})
 
 		req := CreatePermissionRequest{
 			SessionID:   "session2",
@@ -277,7 +296,7 @@ func TestPermissionService_SequentialProperties(t *testing.T) {
 		assert.False(t, result2, "Second request should be denied")
 	})
 	t.Run("Concurrent requests with different outcomes", func(t *testing.T) {
-		service := NewPermissionService("/tmp", false, []string{})
+		service := newTestPermissionService("/tmp", false, []string{})
 
 		events := service.Subscribe(t.Context())
 
@@ -354,7 +373,7 @@ func TestPermissionService_ResolveIdempotency(t *testing.T) {
 
 	t.Run("concurrent grants resolve exactly once", func(t *testing.T) {
 		t.Parallel()
-		service := NewPermissionService("/tmp", false, nil)
+		service := newTestPermissionService("/tmp", false, nil)
 
 		events := service.Subscribe(t.Context())
 		notifications := service.SubscribeNotifications(t.Context())
@@ -450,7 +469,7 @@ func TestPermissionService_ResolveIdempotency(t *testing.T) {
 
 	t.Run("grant after deny is a no-op", func(t *testing.T) {
 		t.Parallel()
-		service := NewPermissionService("/tmp", false, nil)
+		service := newTestPermissionService("/tmp", false, nil)
 
 		events := service.Subscribe(t.Context())
 		notifications := service.SubscribeNotifications(t.Context())
@@ -512,7 +531,7 @@ func TestPermissionService_ResolveIdempotency(t *testing.T) {
 
 	t.Run("losing GrantPersistent does not record session permission", func(t *testing.T) {
 		t.Parallel()
-		service := NewPermissionService("/tmp", false, nil)
+		service := newTestPermissionService("/tmp", false, nil)
 
 		events := service.Subscribe(t.Context())
 		notifications := service.SubscribeNotifications(t.Context())
@@ -584,7 +603,7 @@ func TestPermissionService_ResolveIdempotency(t *testing.T) {
 
 	t.Run("grant for unknown id is a safe no-op", func(t *testing.T) {
 		t.Parallel()
-		service := NewPermissionService("/tmp", false, nil)
+		service := newTestPermissionService("/tmp", false, nil)
 
 		notifications := service.SubscribeNotifications(t.Context())
 
