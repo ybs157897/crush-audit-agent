@@ -19,6 +19,7 @@
       "glob",
       "grep",
       "ls",
+      "semgrep",
       "sourcegraph",
       "todos",
       "view",

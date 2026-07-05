@@ -748,6 +748,7 @@ func allToolNames() []string {
 		"glob",
 		"grep",
 		"ls",
+		"semgrep",
 		"sourcegraph",
 		"todos",
 		"view",

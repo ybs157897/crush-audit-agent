@@ -1,0 +1,1 @@
+Run Semgrep static analysis scans to find bugs, enforce code standards, and detect security vulnerabilities. Supports 30+ languages including Go, Python, JavaScript, TypeScript, Java, C/C++, Rust, and more. Returns structured findings with file paths, line numbers, severity, and rule descriptions. Use this tool for code review, vulnerability detection, and security auditing.
