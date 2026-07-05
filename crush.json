@@ -1,5 +1,31 @@
 {
   "$schema": "https://charm.land/crush.json",
+  "models": {
+    "large": {
+      "model": "free-model",
+      "provider": "local"
+    },
+    "small": {
+      "model": "free-model",
+      "provider": "local"
+    }
+  },
+  "providers": {
+    "local": {
+      "id": "local",
+      "name": "Local",
+      "base_url": "http://192.168.31.106:8090/v1",
+      "type": "openai",
+      "api_key": "ah-aeea2c748db32a705239190d797d0aea0bd664b4cebc6351d66243ec8d2bf62a",
+      "discover_models": false,
+      "models": [
+        {
+          "id": "free-model",
+          "name": "Free Model"
+        }
+      ]
+    }
+  },
   "permissions": {
     "allowed_tools": [
       "agent",
@@ -19,7 +45,7 @@
       "glob",
       "grep",
       "ls",
-      "semgrep",
+      "security_scan",
       "sourcegraph",
       "todos",
       "view",

@@ -672,7 +672,7 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		tools.NewTodosTool(c.sessions),
 		tools.NewViewTool(c.lspManager, c.permissions, c.filetracker, c.skillTracker, c.cfg.WorkingDir(), c.cfg.Config().Options.SkillsPaths...),
 		tools.NewWriteTool(c.lspManager, c.permissions, c.history, c.filetracker, c.cfg.WorkingDir()),
-		tools.NewSemgrepTool(c.permissions, c.cfg.WorkingDir()),
+		tools.NewSecurityScanTool(c.permissions, c.cfg.WorkingDir()),
 	)
 
 	// Add LSP tools if user has configured LSPs or auto_lsp is enabled (nil or true).

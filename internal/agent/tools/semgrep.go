@@ -4,10 +4,8 @@ import (
 	"bytes"
 	"cmp"
 	"context"
-	_ "embed"
 	"encoding/json"
 	"fmt"
-	"html/template"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -15,7 +13,6 @@ import (
 
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/filepathext"
-	"github.com/charmbracelet/crush/internal/permission"
 )
 
 // SemgrepParams defines the input parameters for the semgrep tool.
@@ -65,127 +62,77 @@ const (
 	DefaultMaxFindings  = 50
 )
 
-//go:embed semgrep.md.tpl
-var semgrepDescriptionTmpl []byte
+// runSemgrepScan executes a semgrep scan and returns the parsed JSON output.
+// This is the core scanning logic shared by both NewSemgrepTool and NewSecurityScanTool.
+func runSemgrepScan(ctx context.Context, params SemgrepParams, workingDir string) (*SemgrepOutput, error) {
+	// Check if semgrep is available.
+	semgrepPath, err := exec.LookPath("semgrep")
+	if err != nil {
+		return nil, fmt.Errorf("semgrep is not installed. Install it with: pip install semgrep (or: brew install semgrep on macOS)")
+	}
 
-var semgrepDescriptionTpl = template.Must(
-	template.New("semgrepDescription").
-		Parse(string(semgrepDescriptionTmpl)),
-)
+	scanPath := cmp.Or(params.Path, workingDir)
+	if !filepath.IsAbs(scanPath) {
+		scanPath = filepathext.SmartJoin(workingDir, params.Path)
+	}
 
-func semgrepDescription() string {
-	return string(semgrepDescriptionTmpl)
-}
+	config := cmp.Or(params.Config, "auto")
+	timeout := cmp.Or(params.Timeout, DefaultSemgrepTimeout)
 
-// NewSemgrepTool creates a new semgrep tool for static analysis scanning.
-func NewSemgrepTool(permissions permission.Service, workingDir string) fantasy.AgentTool {
-	return fantasy.NewAgentTool(
-		SemgrepToolName,
-		semgrepDescription(),
-		func(ctx context.Context, params SemgrepParams, call fantasy.ToolCall) (fantasy.ToolResponse, error) {
-			// Check if semgrep is available.
-			semgrepPath, err := exec.LookPath("semgrep")
-			if err != nil {
-				return fantasy.NewTextErrorResponse(
-					"semgrep is not installed. Install it with: pip install semgrep (or: brew install semgrep on macOS)",
-				), nil
-			}
+	// Build semgrep command arguments.
+	args := []string{
+		"scan",
+		"--json",
+		"--config", config,
+		"--timeout", fmt.Sprintf("%d", timeout),
+		"--max-target-bytes", "1000000",
+	}
 
-			scanPath := cmp.Or(params.Path, workingDir)
-			if !filepath.IsAbs(scanPath) {
-				scanPath = filepathext.SmartJoin(workingDir, params.Path)
-			}
+	if params.Language != "" {
+		args = append(args, "--language", params.Language)
+	}
 
-			config := cmp.Or(params.Config, "auto")
-			timeout := cmp.Or(params.Timeout, DefaultSemgrepTimeout)
-			maxFindings := cmp.Or(params.MaxFindings, DefaultMaxFindings)
+	if params.Severity != "" {
+		args = append(args, "--severity", params.Severity)
+	}
 
-			// Request permission for the scan.
-			sessionID := GetSessionFromContext(ctx)
-			if sessionID == "" {
-				return fantasy.ToolResponse{}, fmt.Errorf("session ID is required for semgrep scan")
-			}
+	args = append(args, scanPath)
 
-			p, err := permissions.Request(
-				ctx,
-				permission.CreatePermissionRequest{
-					SessionID:   sessionID,
-					Path:        scanPath,
-					ToolCallID:  call.ID,
-					ToolName:    SemgrepToolName,
-					Action:      "scan",
-					Description: fmt.Sprintf("Run semgrep scan on %s with config %s", scanPath, config),
-					Params:      params,
-				},
-			)
-			if err != nil {
-				return fantasy.ToolResponse{}, err
-			}
-			if !p {
-				return NewPermissionDeniedResponse(), nil
-			}
+	// Run semgrep with timeout.
+	scanCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout+30)*time.Second)
+	defer cancel()
 
-			// Build semgrep command arguments.
-			args := []string{
-				"scan",
-				"--json",
-				"--config", config,
-				"--timeout", fmt.Sprintf("%d", timeout),
-				"--max-target-bytes", "1000000",
-			}
+	cmd := exec.CommandContext(scanCtx, semgrepPath, args...)
+	cmd.Dir = workingDir
 
-			if params.Language != "" {
-				args = append(args, "--language", params.Language)
-			}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 
-			if params.Severity != "" {
-				args = append(args, "--severity", params.Severity)
-			}
-
-			args = append(args, scanPath)
-
-			// Run semgrep with timeout.
-			scanCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout+30)*time.Second)
-			defer cancel()
-
-			cmd := exec.CommandContext(scanCtx, semgrepPath, args...)
-			cmd.Dir = workingDir
-
-			var stdout, stderr bytes.Buffer
-			cmd.Stdout = &stdout
-			cmd.Stderr = &stderr
-
-			// semgrep returns exit code 1 when findings are found, which is normal.
-			runErr := cmd.Run()
-			if runErr != nil {
-				if exitErr, ok := runErr.(*exec.ExitError); ok {
-					// Exit code 1 means findings were found - this is normal.
-					if exitErr.ExitCode() != 1 {
-						errMsg := stderr.String()
-						if errMsg == "" {
-							errMsg = runErr.Error()
-						}
-						return fantasy.NewTextErrorResponse(
-							fmt.Sprintf("semgrep scan failed (exit code %d): %s", exitErr.ExitCode(), errMsg),
-						), nil
-					}
-				} else {
-					return fantasy.ToolResponse{}, fmt.Errorf("failed to run semgrep: %w", runErr)
+	// semgrep returns exit code 1 when findings are found, which is normal.
+	runErr := cmd.Run()
+	if runErr != nil {
+		if exitErr, ok := runErr.(*exec.ExitError); ok {
+			// Exit code 1 means findings were found - this is normal.
+			if exitErr.ExitCode() != 1 {
+				errMsg := stderr.String()
+				if errMsg == "" {
+					errMsg = runErr.Error()
 				}
+				return nil, fmt.Errorf("semgrep scan failed (exit code %d): %s", exitErr.ExitCode(), errMsg)
 			}
+		} else {
+			return nil, fmt.Errorf("failed to run semgrep: %w", runErr)
+		}
+	}
 
-			// Parse JSON output.
-			var output SemgrepOutput
-			if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
-				return fantasy.NewTextErrorResponse(
-					fmt.Sprintf("failed to parse semgrep output: %v\nRaw output: %s", err, truncateSemgrepOutput(stdout.String())),
-				), nil
-			}
+	// Parse JSON output.
+	var output SemgrepOutput
+	if err := json.Unmarshal(stdout.Bytes(), &output); err != nil {
+		return nil, fmt.Errorf("failed to parse semgrep output: %v\nRaw output: %s", err, truncateSemgrepOutput(stdout.String()))
+	}
 
-			// Format results.
-			return formatSemgrepResults(output, maxFindings, scanPath), nil
-		},
-	)
+	return &output, nil
 }
 
 // formatSemgrepResults formats semgrep output into a human-readable response.
