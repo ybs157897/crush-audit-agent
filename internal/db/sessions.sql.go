@@ -10,6 +10,20 @@ import (
 	"database/sql"
 )
 
+const countSessionsByProjectPath = `-- name: CountSessionsByProjectPath :one
+SELECT COUNT(*) AS count
+FROM sessions
+WHERE parent_session_id IS NULL
+  AND project_path = ?
+`
+
+func (q *Queries) CountSessionsByProjectPath(ctx context.Context, projectPath string) (int64, error) {
+	row := q.queryRow(ctx, q.countSessionsByProjectPathStmt, countSessionsByProjectPath, projectPath)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createSession = `-- name: CreateSession :one
 INSERT INTO sessions (
     id,
@@ -20,6 +34,9 @@ INSERT INTO sessions (
     completion_tokens,
     cost,
     summary_message_id,
+    project_path,
+    title_source,
+    title_overridden,
     updated_at,
     created_at
 ) VALUES (
@@ -31,9 +48,12 @@ INSERT INTO sessions (
     ?,
     ?,
     null,
+    ?,
+    ?,
+    ?,
     strftime('%s', 'now'),
     strftime('%s', 'now')
-) RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos
+) RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, project_path, title_source, title_overridden, searchable_text
 `
 
 type CreateSessionParams struct {
@@ -44,6 +64,9 @@ type CreateSessionParams struct {
 	PromptTokens     int64          `json:"prompt_tokens"`
 	CompletionTokens int64          `json:"completion_tokens"`
 	Cost             float64        `json:"cost"`
+	ProjectPath      string         `json:"project_path"`
+	TitleSource      string         `json:"title_source"`
+	TitleOverridden  int64          `json:"title_overridden"`
 }
 
 func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error) {
@@ -55,6 +78,9 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (S
 		arg.PromptTokens,
 		arg.CompletionTokens,
 		arg.Cost,
+		arg.ProjectPath,
+		arg.TitleSource,
+		arg.TitleOverridden,
 	)
 	var i Session
 	err := row.Scan(
@@ -69,6 +95,10 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (S
 		&i.CreatedAt,
 		&i.SummaryMessageID,
 		&i.Todos,
+		&i.ProjectPath,
+		&i.TitleSource,
+		&i.TitleOverridden,
+		&i.SearchableText,
 	)
 	return i, err
 }
@@ -84,14 +114,21 @@ func (q *Queries) DeleteSession(ctx context.Context, id string) error {
 }
 
 const getLastSession = `-- name: GetLastSession :one
-SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos
+SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, project_path, title_source, title_overridden, searchable_text
 FROM sessions
+WHERE parent_session_id IS NULL
+  AND (? = '' OR project_path = ?)
 ORDER BY updated_at DESC
 LIMIT 1
 `
 
-func (q *Queries) GetLastSession(ctx context.Context) (Session, error) {
-	row := q.queryRow(ctx, q.getLastSessionStmt, getLastSession)
+type GetLastSessionParams struct {
+	Column1     interface{} `json:"column_1"`
+	ProjectPath string      `json:"project_path"`
+}
+
+func (q *Queries) GetLastSession(ctx context.Context, arg GetLastSessionParams) (Session, error) {
+	row := q.queryRow(ctx, q.getLastSessionStmt, getLastSession, arg.Column1, arg.ProjectPath)
 	var i Session
 	err := row.Scan(
 		&i.ID,
@@ -105,12 +142,16 @@ func (q *Queries) GetLastSession(ctx context.Context) (Session, error) {
 		&i.CreatedAt,
 		&i.SummaryMessageID,
 		&i.Todos,
+		&i.ProjectPath,
+		&i.TitleSource,
+		&i.TitleOverridden,
+		&i.SearchableText,
 	)
 	return i, err
 }
 
 const getSessionByID = `-- name: GetSessionByID :one
-SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos
+SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, project_path, title_source, title_overridden, searchable_text
 FROM sessions
 WHERE id = ? LIMIT 1
 `
@@ -130,19 +171,29 @@ func (q *Queries) GetSessionByID(ctx context.Context, id string) (Session, error
 		&i.CreatedAt,
 		&i.SummaryMessageID,
 		&i.Todos,
+		&i.ProjectPath,
+		&i.TitleSource,
+		&i.TitleOverridden,
+		&i.SearchableText,
 	)
 	return i, err
 }
 
 const listSessions = `-- name: ListSessions :many
-SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos
+SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, project_path, title_source, title_overridden, searchable_text
 FROM sessions
-WHERE parent_session_id is NULL
+WHERE parent_session_id IS NULL
+  AND (? = '' OR project_path = ?)
 ORDER BY updated_at DESC
 `
 
-func (q *Queries) ListSessions(ctx context.Context) ([]Session, error) {
-	rows, err := q.query(ctx, q.listSessionsStmt, listSessions)
+type ListSessionsParams struct {
+	Column1     interface{} `json:"column_1"`
+	ProjectPath string      `json:"project_path"`
+}
+
+func (q *Queries) ListSessions(ctx context.Context, arg ListSessionsParams) ([]Session, error) {
+	rows, err := q.query(ctx, q.listSessionsStmt, listSessions, arg.Column1, arg.ProjectPath)
 	if err != nil {
 		return nil, err
 	}
@@ -162,6 +213,66 @@ func (q *Queries) ListSessions(ctx context.Context) ([]Session, error) {
 			&i.CreatedAt,
 			&i.SummaryMessageID,
 			&i.Todos,
+			&i.ProjectPath,
+			&i.TitleSource,
+			&i.TitleOverridden,
+			&i.SearchableText,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSessionsNeedingSearchableText = `-- name: ListSessionsNeedingSearchableText :many
+SELECT id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, project_path, title_source, title_overridden, searchable_text
+FROM sessions
+WHERE parent_session_id IS NULL
+  AND (? = '' OR project_path = ?)
+  AND searchable_text = ''
+  AND message_count > 0
+ORDER BY updated_at DESC
+LIMIT ?
+`
+
+type ListSessionsNeedingSearchableTextParams struct {
+	Column1     interface{} `json:"column_1"`
+	ProjectPath string      `json:"project_path"`
+	Limit       int64       `json:"limit"`
+}
+
+func (q *Queries) ListSessionsNeedingSearchableText(ctx context.Context, arg ListSessionsNeedingSearchableTextParams) ([]Session, error) {
+	rows, err := q.query(ctx, q.listSessionsNeedingSearchableTextStmt, listSessionsNeedingSearchableText, arg.Column1, arg.ProjectPath, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Session{}
+	for rows.Next() {
+		var i Session
+		if err := rows.Scan(
+			&i.ID,
+			&i.ParentSessionID,
+			&i.Title,
+			&i.MessageCount,
+			&i.PromptTokens,
+			&i.CompletionTokens,
+			&i.Cost,
+			&i.UpdatedAt,
+			&i.CreatedAt,
+			&i.SummaryMessageID,
+			&i.Todos,
+			&i.ProjectPath,
+			&i.TitleSource,
+			&i.TitleOverridden,
+			&i.SearchableText,
 		); err != nil {
 			return nil, err
 		}
@@ -179,7 +290,9 @@ func (q *Queries) ListSessions(ctx context.Context) ([]Session, error) {
 const renameSession = `-- name: RenameSession :exec
 UPDATE sessions
 SET
-    title = ?
+    title = ?,
+    title_source = 'custom',
+    title_overridden = 1
 WHERE id = ?
 `
 
@@ -201,9 +314,11 @@ SET
     completion_tokens = ?,
     summary_message_id = ?,
     cost = ?,
-    todos = ?
+    todos = ?,
+    title_source = ?,
+    title_overridden = ?
 WHERE id = ?
-RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos
+RETURNING id, parent_session_id, title, message_count, prompt_tokens, completion_tokens, cost, updated_at, created_at, summary_message_id, todos, project_path, title_source, title_overridden, searchable_text
 `
 
 type UpdateSessionParams struct {
@@ -213,6 +328,8 @@ type UpdateSessionParams struct {
 	SummaryMessageID sql.NullString `json:"summary_message_id"`
 	Cost             float64        `json:"cost"`
 	Todos            sql.NullString `json:"todos"`
+	TitleSource      string         `json:"title_source"`
+	TitleOverridden  int64          `json:"title_overridden"`
 	ID               string         `json:"id"`
 }
 
@@ -224,6 +341,8 @@ func (q *Queries) UpdateSession(ctx context.Context, arg UpdateSessionParams) (S
 		arg.SummaryMessageID,
 		arg.Cost,
 		arg.Todos,
+		arg.TitleSource,
+		arg.TitleOverridden,
 		arg.ID,
 	)
 	var i Session
@@ -239,14 +358,35 @@ func (q *Queries) UpdateSession(ctx context.Context, arg UpdateSessionParams) (S
 		&i.CreatedAt,
 		&i.SummaryMessageID,
 		&i.Todos,
+		&i.ProjectPath,
+		&i.TitleSource,
+		&i.TitleOverridden,
+		&i.SearchableText,
 	)
 	return i, err
+}
+
+const updateSessionSearchableText = `-- name: UpdateSessionSearchableText :exec
+UPDATE sessions
+SET searchable_text = ?
+WHERE id = ?
+`
+
+type UpdateSessionSearchableTextParams struct {
+	SearchableText string `json:"searchable_text"`
+	ID             string `json:"id"`
+}
+
+func (q *Queries) UpdateSessionSearchableText(ctx context.Context, arg UpdateSessionSearchableTextParams) error {
+	_, err := q.exec(ctx, q.updateSessionSearchableTextStmt, updateSessionSearchableText, arg.SearchableText, arg.ID)
+	return err
 }
 
 const updateSessionTitleAndUsage = `-- name: UpdateSessionTitleAndUsage :exec
 UPDATE sessions
 SET
     title = ?,
+    title_source = ?,
     prompt_tokens = prompt_tokens + ?,
     completion_tokens = completion_tokens + ?,
     cost = cost + ?,
@@ -256,6 +396,7 @@ WHERE id = ?
 
 type UpdateSessionTitleAndUsageParams struct {
 	Title            string  `json:"title"`
+	TitleSource      string  `json:"title_source"`
 	PromptTokens     int64   `json:"prompt_tokens"`
 	CompletionTokens int64   `json:"completion_tokens"`
 	Cost             float64 `json:"cost"`
@@ -265,10 +406,32 @@ type UpdateSessionTitleAndUsageParams struct {
 func (q *Queries) UpdateSessionTitleAndUsage(ctx context.Context, arg UpdateSessionTitleAndUsageParams) error {
 	_, err := q.exec(ctx, q.updateSessionTitleAndUsageStmt, updateSessionTitleAndUsage,
 		arg.Title,
+		arg.TitleSource,
 		arg.PromptTokens,
 		arg.CompletionTokens,
 		arg.Cost,
 		arg.ID,
 	)
+	return err
+}
+
+const updateSessionTitleMeta = `-- name: UpdateSessionTitleMeta :exec
+UPDATE sessions
+SET
+    title = ?,
+    title_source = ?,
+    updated_at = strftime('%s', 'now')
+WHERE id = ?
+  AND title_overridden = 0
+`
+
+type UpdateSessionTitleMetaParams struct {
+	Title       string `json:"title"`
+	TitleSource string `json:"title_source"`
+	ID          string `json:"id"`
+}
+
+func (q *Queries) UpdateSessionTitleMeta(ctx context.Context, arg UpdateSessionTitleMetaParams) error {
+	_, err := q.exec(ctx, q.updateSessionTitleMetaStmt, updateSessionTitleMeta, arg.Title, arg.TitleSource, arg.ID)
 	return err
 }

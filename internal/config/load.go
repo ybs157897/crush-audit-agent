@@ -1097,6 +1097,14 @@ func GlobalWorkspaceDir() string {
 	return filepath.Dir(GlobalConfigData())
 }
 
+// GlobalCrushDataDir returns the user-level Crush data directory used
+// by the GUI server to store the shared session database and other
+// cross-project state. Project workspaces keep their own per-project
+// .crush directory for logs, init flags, and local overrides.
+func GlobalCrushDataDir() string {
+	return filepath.Join(GlobalWorkspaceDir(), defaultDataDirectory)
+}
+
 func assignIfNil[T any](ptr **T, val T) {
 	if *ptr == nil {
 		*ptr = &val

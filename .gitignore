@@ -54,3 +54,15 @@ manpages/
 completions/crush.*sh
 .prettierignore
 .task
+
+# IDE/tool configs
+.cursor/
+.qoder/
+
+# Temporary extraction/debug artifacts
+tmp_zcode_*/
+tmp_zcode_*.py
+web-screenshot*.png
+
+# Test fixture projects
+test-projects/

@@ -9,6 +9,7 @@ import (
 )
 
 type Querier interface {
+	CountSessionsByProjectPath(ctx context.Context, projectPath string) (int64, error)
 	CreateFile(ctx context.Context, arg CreateFileParams) (File, error)
 	CreateMessage(ctx context.Context, arg CreateMessageParams) (Message, error)
 	CreateSession(ctx context.Context, arg CreateSessionParams) (Session, error)
@@ -22,7 +23,7 @@ type Querier interface {
 	GetFileByPathAndSession(ctx context.Context, arg GetFileByPathAndSessionParams) (File, error)
 	GetFileRead(ctx context.Context, arg GetFileReadParams) (ReadFile, error)
 	GetHourDayHeatmap(ctx context.Context) ([]GetHourDayHeatmapRow, error)
-	GetLastSession(ctx context.Context) (Session, error)
+	GetLastSession(ctx context.Context, arg GetLastSessionParams) (Session, error)
 	GetMessage(ctx context.Context, id string) (Message, error)
 	GetRecentActivity(ctx context.Context) ([]GetRecentActivityRow, error)
 	GetSessionByID(ctx context.Context, id string) (Session, error)
@@ -39,13 +40,16 @@ type Querier interface {
 	ListMessagesBySession(ctx context.Context, sessionID string) ([]Message, error)
 	ListNewFiles(ctx context.Context) ([]File, error)
 	ListSessionReadFiles(ctx context.Context, sessionID string) ([]ReadFile, error)
-	ListSessions(ctx context.Context) ([]Session, error)
+	ListSessions(ctx context.Context, arg ListSessionsParams) ([]Session, error)
+	ListSessionsNeedingSearchableText(ctx context.Context, arg ListSessionsNeedingSearchableTextParams) ([]Session, error)
 	ListUserMessagesBySession(ctx context.Context, sessionID string) ([]Message, error)
 	RecordFileRead(ctx context.Context, arg RecordFileReadParams) error
 	RenameSession(ctx context.Context, arg RenameSessionParams) error
 	UpdateMessage(ctx context.Context, arg UpdateMessageParams) error
 	UpdateSession(ctx context.Context, arg UpdateSessionParams) (Session, error)
+	UpdateSessionSearchableText(ctx context.Context, arg UpdateSessionSearchableTextParams) error
 	UpdateSessionTitleAndUsage(ctx context.Context, arg UpdateSessionTitleAndUsageParams) error
+	UpdateSessionTitleMeta(ctx context.Context, arg UpdateSessionTitleMetaParams) error
 }
 
 var _ Querier = (*Queries)(nil)

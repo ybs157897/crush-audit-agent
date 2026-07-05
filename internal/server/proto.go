@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/charmbracelet/crush/internal/backend"
 	"github.com/charmbracelet/crush/internal/proto"
@@ -521,6 +522,48 @@ func (c *controllerV1) handlePutWorkspaceSession(w http.ResponseWriter, r *http.
 	}
 
 	saved, err := c.backend.SaveSession(r.Context(), id, sess)
+	if err != nil {
+		c.handleError(w, r, err)
+		return
+	}
+	ws, _ := c.backend.GetWorkspace(id)
+	out := sessionToProto(saved)
+	out.IsBusy = isSessionBusy(ws, saved.ID)
+	out.AttachedClients = attachedClients(ws, saved.ID)
+	jsonEncode(w, out)
+}
+
+// handlePatchWorkspaceSessionTitle renames a session title (user-customized).
+//
+//	@Summary		Rename session title
+//	@Tags			sessions
+//	@Accept			json
+//	@Produce		json
+//	@Param			id		path		string					true	"Workspace ID"
+//	@Param			sid		path		string					true	"Session ID"
+//	@Param			request	body		proto.SessionTitlePatch	true	"New title"
+//	@Success		200		{object}	proto.Session
+//	@Failure		400		{object}	proto.Error
+//	@Failure		404		{object}	proto.Error
+//	@Failure		500		{object}	proto.Error
+//	@Router			/workspaces/{id}/sessions/{sid}/title [patch]
+func (c *controllerV1) handlePatchWorkspaceSessionTitle(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	sid := r.PathValue("sid")
+
+	var args proto.SessionTitlePatch
+	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
+		c.server.logError(r, "Failed to decode request", "error", err)
+		jsonError(w, http.StatusBadRequest, "failed to decode request")
+		return
+	}
+	title := strings.TrimSpace(args.Title)
+	if title == "" {
+		jsonError(w, http.StatusBadRequest, "title is required")
+		return
+	}
+
+	saved, err := c.backend.RenameSession(r.Context(), id, sid, title)
 	if err != nil {
 		c.handleError(w, r, err)
 		return

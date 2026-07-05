@@ -685,8 +685,15 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	}
 
 	var wg sync.WaitGroup
+	isFirstUserText := !hasUserTextMessage(msgs)
+	// Set a fast first-input title before the async LLM title path runs.
+	if isFirstUserText {
+		if titleErr := a.sessions.SetTitleFromFirstInput(ctx, call.SessionID, call.Prompt); titleErr != nil {
+			slog.Error("Failed to set first-input session title", "error", titleErr, "sessionID", call.SessionID)
+		}
+	}
 	// Generate title from the first real (non-shell) user prompt.
-	if !hasUserTextMessage(msgs) {
+	if isFirstUserText {
 		titleCtx := ctx // Copy to avoid race with ctx reassignment below.
 		wg.Go(func() {
 			a.GenerateTitle(titleCtx, call.SessionID, call.Prompt)
@@ -750,6 +757,11 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 		defer flushCancel()
 		if flushErr := a.messages.FlushAll(flushCtx); flushErr != nil {
 			slog.Error("Failed to flush pending message updates after run", "error", flushErr)
+		} else if msgs, listErr := a.messages.List(flushCtx, call.SessionID); listErr == nil {
+			searchText := session.BuildSearchableText(msgs)
+			if err := a.sessions.UpdateSearchableText(flushCtx, call.SessionID, searchText); err != nil {
+				slog.Error("Failed to update session searchable text", "error", err, "sessionID", call.SessionID)
+			}
 		}
 		if skipRunComplete {
 			return
@@ -1671,6 +1683,15 @@ func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, user
 		return
 	}
 
+	sess, err := a.sessions.Get(ctx, sessionID)
+	if err != nil {
+		slog.Error("Failed to load session before title generation", "error", err, "sessionID", sessionID)
+		return
+	}
+	if !session.CanAutoSetTitle(sess) {
+		return
+	}
+
 	// Ensure the session always gets a title even if every path below
 	// fails or the context is cancelled before we finish.
 	var titleSaved bool
@@ -1678,7 +1699,11 @@ func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, user
 		if !titleSaved {
 			fallbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 			defer cancel()
-			if err := a.sessions.Rename(fallbackCtx, sessionID, DefaultSessionName); err != nil {
+			fallback := session.TruncateFirstInput(userPrompt, 50)
+			if fallback == "" {
+				fallback = DefaultSessionName
+			}
+			if err := a.sessions.SetTitleFromFirstInput(fallbackCtx, sessionID, fallback); err != nil {
 				slog.Error("Failed to save fallback session title", "error", err)
 			}
 		}
@@ -1720,7 +1745,6 @@ func (a *sessionAgent) GenerateTitle(ctx context.Context, sessionID string, user
 	}
 
 	var resp *fantasy.AgentResult
-	var err error
 	var model Model
 	var success bool
 	for _, attempt := range attempts {

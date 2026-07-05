@@ -51,6 +51,10 @@ type Session struct {
 	ID               string
 	ParentSessionID  string
 	Title            string
+	TitleSource      string
+	TitleOverridden  bool
+	ProjectPath      string
+	SearchableText   string
 	MessageCount     int64
 	PromptTokens     int64
 	CompletionTokens int64
@@ -71,7 +75,9 @@ type Service interface {
 	GetLast(ctx context.Context) (Session, error)
 	List(ctx context.Context) ([]Session, error)
 	Save(ctx context.Context, session Session) (Session, error)
+	SetTitleFromFirstInput(ctx context.Context, sessionID, text string) error
 	UpdateTitleAndUsage(ctx context.Context, sessionID, title string, promptTokens, completionTokens int64, cost float64) error
+	UpdateSearchableText(ctx context.Context, sessionID, searchableText string) error
 	Rename(ctx context.Context, id string, title string) error
 	Delete(ctx context.Context, id string) error
 
@@ -81,23 +87,52 @@ type Service interface {
 	IsAgentToolSession(sessionID string) bool
 }
 
+type ServiceOption func(*service)
+
+// WithProjectPath scopes list/create operations to a workspace path.
+func WithProjectPath(path string) ServiceOption {
+	return func(s *service) {
+		s.projectPath = strings.TrimSpace(path)
+	}
+}
+
 type service struct {
 	*pubsub.Broker[Session]
-	db *sql.DB
-	q  *db.Queries
+	db          *sql.DB
+	q           *db.Queries
+	projectPath string
 
-	// Estimated usage stays in memory so fetch-modify-save paths (e.g.,
-	// updating todos or parent-session cost) do not rebuild a session from
-	// SQLite and incorrectly clear the UI "~" marker.
 	estimatedUsageMu sync.RWMutex
 	estimatedUsage   map[string]bool
 }
 
+func (s *service) listParams() db.ListSessionsParams {
+	return db.ListSessionsParams{
+		Column1:     s.projectPath,
+		ProjectPath: s.projectPath,
+	}
+}
+
+func (s *service) lastParams() db.GetLastSessionParams {
+	return db.GetLastSessionParams{
+		Column1:     s.projectPath,
+		ProjectPath: s.projectPath,
+	}
+}
+
+func (s *service) newCreateParams(id string, parentID sql.NullString, title string) db.CreateSessionParams {
+	return db.CreateSessionParams{
+		ID:              id,
+		ParentSessionID: parentID,
+		Title:           title,
+		ProjectPath:     s.projectPath,
+		TitleSource:     TitleSourceDefault,
+		TitleOverridden: 0,
+	}
+}
+
 func (s *service) Create(ctx context.Context, title string) (Session, error) {
-	dbSession, err := s.q.CreateSession(ctx, db.CreateSessionParams{
-		ID:    uuid.New().String(),
-		Title: title,
-	})
+	dbSession, err := s.q.CreateSession(ctx, s.newCreateParams(uuid.New().String(), sql.NullString{}, title))
 	if err != nil {
 		return Session{}, err
 	}
@@ -108,11 +143,11 @@ func (s *service) Create(ctx context.Context, title string) (Session, error) {
 }
 
 func (s *service) CreateTaskSession(ctx context.Context, toolCallID, parentSessionID, title string) (Session, error) {
-	dbSession, err := s.q.CreateSession(ctx, db.CreateSessionParams{
-		ID:              toolCallID,
-		ParentSessionID: sql.NullString{String: parentSessionID, Valid: true},
-		Title:           title,
-	})
+	dbSession, err := s.q.CreateSession(ctx, s.newCreateParams(
+		toolCallID,
+		sql.NullString{String: parentSessionID, Valid: true},
+		title,
+	))
 	if err != nil {
 		return Session{}, err
 	}
@@ -122,11 +157,11 @@ func (s *service) CreateTaskSession(ctx context.Context, toolCallID, parentSessi
 }
 
 func (s *service) CreateTitleSession(ctx context.Context, parentSessionID string) (Session, error) {
-	dbSession, err := s.q.CreateSession(ctx, db.CreateSessionParams{
-		ID:              "title-" + parentSessionID,
-		ParentSessionID: sql.NullString{String: parentSessionID, Valid: true},
-		Title:           "Generate a title",
-	})
+	dbSession, err := s.q.CreateSession(ctx, s.newCreateParams(
+		"title-"+parentSessionID,
+		sql.NullString{String: parentSessionID, Valid: true},
+		"Generate a title",
+	))
 	if err != nil {
 		return Session{}, err
 	}
@@ -179,7 +214,7 @@ func (s *service) Get(ctx context.Context, id string) (Session, error) {
 }
 
 func (s *service) GetLast(ctx context.Context) (Session, error) {
-	dbSession, err := s.q.GetLastSession(ctx)
+	dbSession, err := s.q.GetLastSession(ctx, s.lastParams())
 	if err != nil {
 		return Session{}, err
 	}
@@ -192,6 +227,11 @@ func (s *service) Save(ctx context.Context, session Session) (Session, error) {
 	todosJSON, err := marshalTodos(session.Todos)
 	if err != nil {
 		return Session{}, err
+	}
+
+	titleSource := session.TitleSource
+	if titleSource == "" {
+		titleSource = TitleSourceDefault
 	}
 
 	dbSession, err := s.q.UpdateSession(ctx, db.UpdateSessionParams{
@@ -208,6 +248,8 @@ func (s *service) Save(ctx context.Context, session Session) (Session, error) {
 			String: todosJSON,
 			Valid:  todosJSON != "",
 		},
+		TitleSource:     titleSource,
+		TitleOverridden: boolToInt64(session.TitleOverridden),
 	})
 	if err != nil {
 		return Session{}, err
@@ -220,15 +262,62 @@ func (s *service) Save(ctx context.Context, session Session) (Session, error) {
 	return session, nil
 }
 
-// UpdateTitleAndUsage updates only the title and usage fields atomically.
-// This is safer than fetching, modifying, and saving the entire session.
+// SetTitleFromFirstInput sets a truncated first-message title when eligible.
+func (s *service) SetTitleFromFirstInput(ctx context.Context, sessionID, text string) error {
+	title := TruncateFirstInput(text, 50)
+	if title == "" {
+		return nil
+	}
+	sess, err := s.Get(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	if !CanAutoSetTitle(sess) {
+		return nil
+	}
+	if err := s.q.UpdateSessionTitleMeta(ctx, db.UpdateSessionTitleMetaParams{
+		Title:       title,
+		TitleSource: TitleSourceFirstInput,
+		ID:          sessionID,
+	}); err != nil {
+		return err
+	}
+	s.publishSessionUpdate(ctx, sessionID)
+	return nil
+}
+
+// UpdateTitleAndUsage updates title and usage when automatic title changes are allowed.
 func (s *service) UpdateTitleAndUsage(ctx context.Context, sessionID, title string, promptTokens, completionTokens int64, cost float64) error {
+	sess, err := s.Get(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	titleSource := TitleSourceGenerated
+	if !CanAutoSetTitle(sess) {
+		title = sess.Title
+		titleSource = sess.TitleSource
+		if titleSource == "" {
+			titleSource = TitleSourceDefault
+		}
+	}
 	if err := s.q.UpdateSessionTitleAndUsage(ctx, db.UpdateSessionTitleAndUsageParams{
 		ID:               sessionID,
 		Title:            title,
+		TitleSource:      titleSource,
 		PromptTokens:     promptTokens,
 		CompletionTokens: completionTokens,
 		Cost:             cost,
+	}); err != nil {
+		return err
+	}
+	s.publishSessionUpdate(ctx, sessionID)
+	return nil
+}
+
+func (s *service) UpdateSearchableText(ctx context.Context, sessionID, searchableText string) error {
+	if err := s.q.UpdateSessionSearchableText(ctx, db.UpdateSessionSearchableTextParams{
+		SearchableText: searchableText,
+		ID:             sessionID,
 	}); err != nil {
 		return err
 	}
@@ -250,7 +339,7 @@ func (s *service) Rename(ctx context.Context, id string, title string) error {
 }
 
 func (s *service) List(ctx context.Context) ([]Session, error) {
-	dbSessions, err := s.q.ListSessions(ctx)
+	dbSessions, err := s.q.ListSessions(ctx, s.listParams())
 	if err != nil {
 		return nil, err
 	}
@@ -262,8 +351,6 @@ func (s *service) List(ctx context.Context) ([]Session, error) {
 	return sessions, nil
 }
 
-// publishSessionUpdate re-fetches a session and publishes an UpdatedEvent so
-// that UI subscribers reflect title or usage changes.
 func (s *service) publishSessionUpdate(ctx context.Context, sessionID string) {
 	session, err := s.Get(ctx, sessionID)
 	if err != nil {
@@ -300,10 +387,18 @@ func (s *service) fromDBItem(item db.Session) Session {
 	if err != nil {
 		slog.Error("Failed to unmarshal todos", "session_id", item.ID, "error", err)
 	}
+	titleSource := item.TitleSource
+	if titleSource == "" {
+		titleSource = TitleSourceDefault
+	}
 	return Session{
 		ID:               item.ID,
 		ParentSessionID:  item.ParentSessionID.String,
 		Title:            item.Title,
+		TitleSource:      titleSource,
+		TitleOverridden:  item.TitleOverridden != 0,
+		ProjectPath:      item.ProjectPath,
+		SearchableText:   item.SearchableText,
 		MessageCount:     item.MessageCount,
 		PromptTokens:     item.PromptTokens,
 		CompletionTokens: item.CompletionTokens,
@@ -313,6 +408,13 @@ func (s *service) fromDBItem(item db.Session) Session {
 		CreatedAt:        item.CreatedAt,
 		UpdatedAt:        item.UpdatedAt,
 	}
+}
+
+func boolToInt64(v bool) int64 {
+	if v {
+		return 1
+	}
+	return 0
 }
 
 func marshalTodos(todos []Todo) (string, error) {
@@ -337,14 +439,17 @@ func unmarshalTodos(data string) ([]Todo, error) {
 	return todos, nil
 }
 
-func NewService(q *db.Queries, conn *sql.DB) Service {
-	broker := pubsub.NewBroker[Session]()
-	return &service{
-		Broker:         broker,
+func NewService(q *db.Queries, conn *sql.DB, opts ...ServiceOption) Service {
+	s := &service{
+		Broker:         pubsub.NewBroker[Session](),
 		db:             conn,
 		q:              q,
 		estimatedUsage: make(map[string]bool),
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // CreateAgentToolSessionID creates a session ID for agent tool sessions using the format "messageID$$toolCallID"

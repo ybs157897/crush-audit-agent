@@ -18,6 +18,7 @@
       "type": "openai",
       "api_key": "ah-aeea2c748db32a705239190d797d0aea0bd664b4cebc6351d66243ec8d2bf62a",
       "discover_models": false,
+      "system_prompt_prefix": "请始终使用简体中文思考和回复。代码、命令、文件路径、标识符保持原文，其余说明用中文。",
       "models": [
         {
           "id": "free-model",
