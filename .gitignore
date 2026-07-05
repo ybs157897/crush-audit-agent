@@ -66,3 +66,7 @@ web-screenshot*.png
 
 # Test fixture projects
 test-projects/
+
+# Node.js dependencies and build outputs
+**/node_modules/
+**/dist/

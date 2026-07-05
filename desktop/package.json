@@ -1,0 +1,33 @@
+{
+  "name": "crush-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Crush desktop shell (Electron)",
+  "main": "main.js",
+  "scripts": {
+    "dev": "electron .",
+    "start": "electron .",
+    "build:web": "npm run build --prefix ../web",
+    "pack": "npm run build:web && electron-builder --dir",
+    "dist": "npm run build:web && electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^34.5.8",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "land.charm.crush",
+    "productName": "Crush",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "../web/dist/**/*"
+    ],
+    "win": {
+      "target": ["nsis", "portable"]
+    }
+  }
+}
